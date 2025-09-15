@@ -1,4 +1,5 @@
 from decimal import Decimal, getcontext
+import re
 
 
 class IEEE754:
@@ -145,7 +146,7 @@ class IEEE754:
             number = str(number)
         try:
             number = Decimal(number)
-        except:
+        except Exception:
             raise ValueError(f"Invalid number: {number}")
         denormalized_range = self.calculate_denormalized_range(
             self.__exponent, self.__mantissa
@@ -247,23 +248,121 @@ class IEEE754:
         return self.output
 
     def back_to_decimal_from_bits(self) -> (Decimal, Decimal):
+        number, mantissa_base_10 = IEEE754.back_to_decimal_from_bits_external(
+            self.__str__(), self.__exponent, self.__mantissa
+        )
+        if mantissa_base_10 is not None:
+            self.output["mantissa_base_10"] = mantissa_base_10
+        error = Decimal(self.original_number - number).copy_abs()
+        return number, error
+
+    @staticmethod
+    def back_to_decimal_from_bits_external(
+        ieee754_string: str, force_exponent: int = None, force_mantissa: int = None
+    ) -> (Decimal, Decimal):
         """
+        IEEE 754 Conversion from Bits to Decimal
+
+        Parameters
+        ----------
+        ieee754_string : str
+            IEEE 754 string to be converted.
+        force_exponent : int, optional
+            If provided, this value will be used as the exponent length. Must be provided together with force_mantissa.
+        force_mantissa : int, optional
+            If provided, this value will be used as the mantissa length. Must be provided together with force_exponent.
+
         Returns
         -------
         Decimal
             Decimal representation of the number
+            Mantissa in base 10 (None if special case)
+
+        Examples
+        --------
+        >>> back_to_decimal_from_bits_external('0 10010 1010110000')
+        (Decimal('13.375'), Decimal('0.0'))
+
+        >>> back_to_decimal_from_bits_external("11000000101011000000000000000000", 8, 23))
+        (Decimal('-5.5'), Decimal('0.0'))
+
+        Project
+        -------
+        https://github.com/canbula/ieee754
         """
-        sign, exponent, mantissa = self.__str__().split(" ")
-        mantissa_base_10 = Decimal(0)
-        for i in range(len(mantissa)):
-            mantissa_base_10 += Decimal(int(mantissa[i]) * Decimal(2) ** -(i + 1))
-        self.output["mantissa_base_10"] = mantissa_base_10
-        sign = (-1) ** int(sign)
-        exponent = int(exponent, 2) - self.__bias
-        mantissa = int(mantissa, 2)
-        number = Decimal(sign * (1 + mantissa * 2**-self.__mantissa) * 2**exponent)
-        error = Decimal(self.original_number - number).copy_abs()
-        return number, error
+        # remove any whitespace or other splitting characters
+        ieee754_string = re.sub("\D", "", ieee754_string)
+        total_length = len(ieee754_string)
+
+        # determine the lengths of the exponent and mantissa based on the forced values if provided
+        if force_exponent is not None and force_mantissa is not None:
+            exponent_length = force_exponent
+            mantissa_length = force_mantissa
+        elif force_exponent is not None or force_mantissa is not None:
+            raise ValueError(
+                "Both force_exponent and force_mantissa must be provided together"
+            )
+        # determine the lengths of the exponent and mantissa based on the total length
+        elif total_length == 16:  # Half precision
+            exponent_length = 5
+            mantissa_length = 10
+        elif total_length == 32:  # Single precision
+            exponent_length = 8
+            mantissa_length = 23
+        elif total_length == 64:  # Double precision
+            exponent_length = 11
+            mantissa_length = 52
+        elif total_length == 128:  # Quadruple precision
+            exponent_length = 15
+            mantissa_length = 112
+        elif total_length == 256:  # Octuple precision
+            exponent_length = 19
+            mantissa_length = 236
+        else:
+            raise ValueError("Invalid IEEE 754 string length")
+
+        # extract the sign, exponent, and mantissa from the string
+        sign = ieee754_string[0]
+        exponent = ieee754_string[1 : 1 + exponent_length]
+        mantissa = ieee754_string[
+            1 + exponent_length : 1 + exponent_length + mantissa_length
+        ]
+
+        # calculate the bias
+        bias = 2 ** (exponent_length - 1) - 1
+        # handle special cases
+        if exponent == "1" * exponent_length:
+            if mantissa == "0" * mantissa_length:
+                return (
+                    (Decimal("Infinity"), None)
+                    if sign == "0"
+                    else (Decimal("-Infinity"), None)
+                )
+            else:
+                return (Decimal("NaN"), None)
+        elif exponent == "0" * exponent_length and mantissa == "0" * mantissa_length:
+            return (Decimal("0"), None) if sign == "0" else (Decimal("-0"), None)
+        elif exponent == "0" * exponent_length:
+            # Denormalized number
+            sign = (-1) ** int(sign)
+            exponent_value = 1 - bias
+            mantissa_base_10 = Decimal(0)
+            for i in range(len(mantissa)):
+                mantissa_base_10 += Decimal(int(mantissa[i]) * Decimal(2) ** -(i + 1))
+            number = Decimal(sign * mantissa_base_10 * (2**exponent_value))
+            return number, mantissa_base_10
+        else:  # not a special case
+            # calculate the decimal value
+            mantissa_base_10 = Decimal(0)
+            for i in range(len(mantissa)):
+                mantissa_base_10 += Decimal(int(mantissa[i]) * Decimal(2) ** -(i + 1))
+            sign = (-1) ** int(sign)
+            exponent_value = int(exponent, 2) - bias
+            mantissa_value = int(mantissa, 2)
+            number = Decimal(
+                sign * (1 + mantissa_value * 2**-mantissa_length) * 2**exponent_value
+            )
+            return number, mantissa_base_10
 
 
 def half(x: str) -> IEEE754:
@@ -468,3 +567,41 @@ if __name__ == "__main__":
     print(IEEE754("NaN"))
     print(IEEE754("-NaN"))
     print(half(-0.17))
+
+    x = 13.375
+    print("Testing back_to_decimal_from_bits_external:")
+    print(IEEE754.back_to_decimal_from_bits_external(str(half(x))))
+    print(IEEE754.back_to_decimal_from_bits_external(str(single(x))))
+    print(IEEE754.back_to_decimal_from_bits_external(str(double(x))))
+    print(IEEE754.back_to_decimal_from_bits_external(str(quadruple(x))))
+    print(IEEE754.back_to_decimal_from_bits_external(str(octuple(x))))
+    print(
+        IEEE754.back_to_decimal_from_bits_external(
+            "11000000101011000000000000000000", 8, 23
+        )
+    )  # single precision of -5.5
+    print(
+        IEEE754.back_to_decimal_from_bits_external("00000000000000000000000000000000")
+    )  # single precision of 0.0
+    print(
+        IEEE754.back_to_decimal_from_bits_external("10000000000000000000000000000000")
+    )  # single precision of -0.0
+    print(
+        IEEE754.back_to_decimal_from_bits_external("01111111100000000000000000000000")
+    )  # single precision of +inf
+    print(
+        IEEE754.back_to_decimal_from_bits_external("11111111100000000000000000000000")
+    )  # single precision of -inf
+    print(
+        IEEE754.back_to_decimal_from_bits_external("01111111110000000000000000000000")
+    )  # single precision of qnan
+    print(
+        IEEE754.back_to_decimal_from_bits_external("01111111100000000000000000000001")
+    )  # single precision of snan
+    print(
+        IEEE754.back_to_decimal_from_bits_external("01111111111111111111111111111111")
+    )  # single precision of nan
+    print("Testing back_to_decimal_from_bits:")
+    print(single(-5.5).back_to_decimal_from_bits())
+    print(double(-43567.5).back_to_decimal_from_bits())
+    print(single(3485567.523456789876787654345).back_to_decimal_from_bits())
